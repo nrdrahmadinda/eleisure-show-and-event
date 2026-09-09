@@ -1,0 +1,129 @@
+name: showsevents-github-runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-and-report:
+    runs-on: self-hosted
+    env:
+      NODE_OPTIONS: "--no-deprecation"
+
+    steps:
+    - name: Reclaim Workspace Permissions
+      if: always()
+      run: sudo chown -R $USER:$USER ${{ github.workspace }}
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 1. 🧹 Pre-run Cleanup
+    - name: Clean Local Staging Environments
+      run: |
+        rm -rf allure-results/* || true
+        rm -rf ${{ github.workspace }}/local-allure-staging/* || true
+        mkdir -p ${{ github.workspace }}/local-allure-staging
+
+    - name: Install Dependencies
+      run: npm install
+
+    # 2. 🚀 LOCAL MATRIX ITERATION: Sequentially loop products locally to dynamically pool files
+    - name: Run Playwright Tests Concurrently
+      env:
+        TEST_ENV: ${{ github.event.inputs.target_environment || 'UAT' }}
+      run: |
+        INPUT_PRODUCTS='${{ github.event.inputs.run_products }}'
+        
+        # 💡 Safety Check: Intercept empty, null, or broken 'Array' strings
+        if [ -z "$INPUT_PRODUCTS" ] || [ "$INPUT_PRODUCTS" = "Array" ] || [ "$INPUT_PRODUCTS" = "null" ]; then
+          echo "⚠️ Invalid or empty input detected. Falling back to default products."
+          PRODUCTS='["fnb", "skyway", "themepark"]'
+        else
+          echo "📥 Valid manual trigger detected."
+          PRODUCTS="$INPUT_PRODUCTS"
+        fi
+        
+        # Convert JSON string array to space-separated list safely
+        PARSED_PRODUCTS=$(echo "$PRODUCTS" | jq -r '.[]')
+        
+        for product in $PARSED_PRODUCTS; do
+          echo "🏁 Launching Suite for Product: $product"
+          
+          # Map product name to test directory
+          case "$product" in
+            fnb)       TEST_DIR="tests/Fnb" ;;
+            skyway)    TEST_DIR="tests/Skyway" ;;
+            themepark) TEST_DIR="tests/ThemePark" ;;
+            hotel)     TEST_DIR="tests/Hotel" ;;
+            *)
+              echo "⚠️ Unknown product: $product — skipping."
+              continue
+              ;;
+          esac
+          
+          echo "📂 Running tests from: $TEST_DIR"
+          
+          # Wipe raw directory inside the runner framework sandbox
+          rm -rf allure-results allure-report playwright-report test-results || true
+          
+          # Execute Playwright for this specific product directory only
+          npx playwright test "$TEST_DIR" --project=chromium || true
+          
+          # Immediately move the outputs to a dedicated shared local path before the next loop
+          if [ -d "allure-results" ] && [ "$(ls -A allure-results)" ]; then
+            cp -r allure-results/* ${{ github.workspace }}/local-allure-staging/
+          fi
+        done
+
+
+    # 3. 📂 Pull Historical Trend Records
+    - name: Pull Historical Trend Records
+      continue-on-error: true
+      run: |
+        mkdir -p ${{ github.workspace }}/local-allure-history
+        # Fetch the history directory from your server's long-term storage location if it exists
+        if [ -d "/var/www/reports/allure-history-base" ]; then
+          cp -r /var/www/reports/allure-history-base/* ${{ github.workspace }}/local-allure-history/
+        fi
+
+    - name: Generate Allure Report with History
+      uses: simple-elf/allure-report-action@master
+      id: allure-report
+      with:
+        allure_results: local-allure-staging
+        gh_pages: local-allure-history
+        allure_report: allure-report
+        allure_history: allure-history
+
+   # 4. 💾 Save report locally without network transfers
+    - name: Save Report to Local Storage
+      if: always()
+      run: |
+        TARGET_DIR="/var/www/reports/web/eleisure/shows-events-run/${{ github.run_id }}"
+        HISTORY_BASE="/var/www/reports/web/allure-history-base"
+        
+        mkdir -p "$TARGET_DIR"
+        mkdir -p "$HISTORY_BASE"
+        
+        # Target the run_number subfolder to bypass the GitHub Pages redirect script
+        if [ -d "allure-history/${{ github.run_number }}" ]; then
+          cp -r allure-history/${{ github.run_number }}/* "$TARGET_DIR/"
+          cp -r allure-history/${{ github.run_number }}/history/* "$HISTORY_BASE/"
+          echo "✅ Report saved securely without external redirects."
+        else
+          echo "⚠️ No compiled report directory found."
+        fi
+
+    - name: Output Server Report Path
+      if: always()
+      run: |
+        echo "📊 Local Report Folder: /var/www/reports/web/eleisure/shows-events-run/${{ github.run_id }}/"
+        echo "🌐 Public View URL: https://ars-automation-report.duckdns.org/web/eleisure/shows-events-run/${{ github.run_id }}/index.html"
+        
+    - name: Reclaim Workspace Permissions from Docker
+      if: always()
+      run: sudo chown -R $USER:$USER ${{ github.workspace }}
+
+
+
+      
